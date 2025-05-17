@@ -1,0 +1,14 @@
+/target
+/.direnv
+/asset/*
+/asset/!splash
+/asset/!font.bmp
+rustc-ice-*
+.gdb_history
+
+
+# Added by cargo
+#
+# already existing elements were commented out
+
+#/target
