@@ -12,7 +12,7 @@ use serenity::{
     async_trait,
     futures::StreamExt,
 };
-use tokio::time::{Duration, Instant};
+use tokio::time::{self, Duration, Instant};
 
 //
 
@@ -162,7 +162,11 @@ impl EventHandler for Handler {
         let builder = CreateInteractionResponse::Message(data);
         if let Err(err) = command.create_response(&ctx.http, builder).await {
             tracing::error!("failed to respond to a command: {err}");
-        }
+        };
+
+        time::sleep(Duration::from_secs(5)).await;
+
+        _ = command.delete_response(&ctx.http).await;
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
