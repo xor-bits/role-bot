@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use serenity::all::{
     CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
     ResolvedOption, ResolvedValue,
@@ -51,10 +53,28 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
     };
     let user_roles = user.value();
 
-    let Some((role_id, _)) =
-        user_roles.remove_if(&role.id, |_, t| t.elapsed() >= Duration::from_secs(172_800))
-    else {
-        return "cooldown on a recently added role".to_string();
+    match user_roles.entry(role.id) {
+        dashmap::Entry::Occupied(occupied_entry) => {
+            let left = Duration::from_secs(172_800).saturating_sub(occupied_entry.get().elapsed());
+            if left.is_zero() {
+                tracing::debug!("out of cooldown");
+                occupied_entry.remove();
+            } else {
+                let time = SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0));
+
+                tracing::debug!("on cooldown");
+
+                return format!(
+                    "cooldown on a recently added role, try again <t:{}:R>",
+                    (time + left).as_secs()
+                );
+            }
+        }
+        dashmap::Entry::Vacant(_) => {
+            return "wdym, the user doesn't even have this role".to_string();
+        }
     };
 
     if let Err(err) = ctx
@@ -62,7 +82,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         .remove_member_role(
             guild.id,
             *user.key(),
-            role_id,
+            role.id,
             Some("added custom role to a user using the add command"),
         )
         .await

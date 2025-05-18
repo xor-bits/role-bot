@@ -144,7 +144,11 @@ impl EventHandler for Handler {
             return;
         };
 
-        // tracing::debug!("received command: {command:#?}");
+        tracing::debug!(
+            "received command: {} from {}",
+            command.data.name,
+            command.user.name
+        );
 
         let guild = match self.get_guild(&ctx, guild_id).await {
             Ok(guild) => guild,
@@ -154,31 +158,35 @@ impl EventHandler for Handler {
             }
         };
 
+        tracing::debug!("got guild");
         let content: String = 'b: {
             match guild.interaction_cooldown.entry(command.user.id) {
                 dashmap::Entry::Occupied(occupied_entry) => {
-                    let left = occupied_entry
-                        .get()
-                        .elapsed()
-                        .saturating_sub(Duration::from_secs(3600));
+                    let left =
+                        Duration::from_secs(3600).saturating_sub(occupied_entry.get().elapsed());
                     if left.is_zero() {
+                        tracing::debug!("out of cooldown");
                         occupied_entry.remove();
                     } else {
                         let time = SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or(std::time::Duration::from_secs(0));
 
+                        tracing::debug!("on cooldown");
+
                         break 'b format!(
-                            "whoa cool down buddy, <t:{}:R> left",
+                            "whoa cool down buddy, try again <t:{}:R>",
                             (time + left).as_secs()
                         );
                     }
                 }
                 dashmap::Entry::Vacant(vacant_entry) => {
+                    tracing::debug!("new cooldown");
                     vacant_entry.insert(Instant::now());
                 }
             }
 
+            tracing::debug!("running cmd");
             let content = match command.data.name.as_str() {
                 "new_role" => new_role::run(&guild, &ctx, &command).await,
                 // "delete_role" => new_role::run(&guild, &ctx, &command).await,
@@ -186,6 +194,8 @@ impl EventHandler for Handler {
                 "remove" => remove::run(&guild, &ctx, &command).await,
                 _ => "???".to_string(),
             };
+
+            tracing::debug!("result = {content}");
 
             break 'b content;
         };
@@ -196,6 +206,7 @@ impl EventHandler for Handler {
             tracing::error!("failed to respond to a command: {err}");
         };
 
+        drop(guild);
         time::sleep(Duration::from_secs(300)).await;
 
         if let Err(err) = command.delete_response(&ctx.http).await {
