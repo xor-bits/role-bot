@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, time::SystemTime};
 
 use color_eyre::eyre::Result;
 use dashmap::{DashMap, DashSet, mapref::one::Ref};
@@ -37,6 +37,9 @@ struct Guild {
 
     /// used for checking if the user has some role
     user_roles: DashMap<UserId, DashMap<RoleId, Instant>>,
+
+    /// cooldown on sending commands
+    interaction_cooldown: DashMap<UserId, Instant>,
 }
 
 impl Handler {
@@ -98,6 +101,7 @@ impl Handler {
                 role_names,
                 roles,
                 user_roles,
+                interaction_cooldown: <_>::default(),
             })
             .downgrade())
     }
@@ -150,12 +154,40 @@ impl EventHandler for Handler {
             }
         };
 
-        let content = match command.data.name.as_str() {
-            "new_role" => new_role::run(&guild, &ctx, &command).await,
-            // "delete_role" => new_role::run(&guild, &ctx, &command).await,
-            "add" => add::run(&guild, &ctx, &command).await,
-            "remove" => remove::run(&guild, &ctx, &command).await,
-            _ => "???".to_string(),
+        let content: String = 'b: {
+            match guild.interaction_cooldown.entry(command.user.id) {
+                dashmap::Entry::Occupied(occupied_entry) => {
+                    let left = occupied_entry
+                        .get()
+                        .elapsed()
+                        .saturating_sub(Duration::from_secs(3600));
+                    if left.is_zero() {
+                        occupied_entry.remove();
+                    } else {
+                        let time = SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or(std::time::Duration::from_secs(0));
+
+                        break 'b format!(
+                            "whoa cool down buddy, <t:{}:R> left",
+                            (time + left).as_secs()
+                        );
+                    }
+                }
+                dashmap::Entry::Vacant(vacant_entry) => {
+                    vacant_entry.insert(Instant::now());
+                }
+            }
+
+            let content = match command.data.name.as_str() {
+                "new_role" => new_role::run(&guild, &ctx, &command).await,
+                // "delete_role" => new_role::run(&guild, &ctx, &command).await,
+                "add" => add::run(&guild, &ctx, &command).await,
+                "remove" => remove::run(&guild, &ctx, &command).await,
+                _ => "???".to_string(),
+            };
+
+            break 'b content;
         };
 
         let data = CreateInteractionResponseMessage::new().content(content);
