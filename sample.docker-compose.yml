@@ -1,0 +1,5 @@
+services:
+  bot:
+    environment:
+      - TOKEN=TOKEN HERE
+    build: ./

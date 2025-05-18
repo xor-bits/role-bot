@@ -5,6 +5,7 @@
 /asset/!font.bmp
 rustc-ice-*
 .gdb_history
+docker-compose.yml
 
 
 # Added by cargo
