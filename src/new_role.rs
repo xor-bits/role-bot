@@ -1,9 +1,11 @@
+use std::time::Duration;
+
 use serenity::all::{
     CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption, EditRole,
     Permissions, ResolvedOption, ResolvedValue,
 };
 
-use crate::Guild;
+use crate::{Guild, cooldown};
 
 //
 
@@ -25,6 +27,14 @@ pub fn register() -> CreateCommand {
 }
 
 pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction) -> String {
+    if let Err(cooldown) = cooldown(
+        &guild.new_role_cooldown,
+        interaction.user.id,
+        Duration::from_secs(3600),
+    ) {
+        return format!("command cooldown, try again <t:{}:R>", cooldown.as_secs());
+    }
+
     let options = interaction.data.options();
 
     let Some(ResolvedOption {

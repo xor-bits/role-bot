@@ -7,7 +7,7 @@ use serenity::all::{
 
 use tokio::time::Duration;
 
-use crate::Guild;
+use crate::{Guild, cooldown};
 
 //
 
@@ -34,6 +34,14 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
     else {
         return "missing user".to_string();
     };
+
+    if let Err(cooldown) = cooldown(
+        &guild.remove_cooldown,
+        (interaction.user.id, user.id),
+        Duration::from_secs(3600),
+    ) {
+        return format!("command cooldown, try again <t:{}:R>", cooldown.as_secs());
+    }
 
     let Some(ResolvedOption {
         name: "role",

@@ -1,4 +1,4 @@
-use std::{env, time::SystemTime};
+use std::{env, hash::Hash, time::SystemTime};
 
 use color_eyre::eyre::Result;
 use dashmap::{DashMap, DashSet, mapref::one::Ref};
@@ -39,7 +39,41 @@ struct Guild {
     user_roles: DashMap<UserId, DashMap<RoleId, Instant>>,
 
     /// cooldown on sending commands
-    interaction_cooldown: DashMap<UserId, Instant>,
+    new_role_cooldown: DashMap<UserId, Instant>,
+    add_cooldown: DashMap<(UserId, UserId), Instant>,
+    remove_cooldown: DashMap<(UserId, UserId), Instant>,
+}
+
+pub fn cooldown<K: Hash + Eq>(
+    cooldown_map: &DashMap<K, Instant>,
+    key: K,
+    cooldown: Duration,
+) -> Result<(), Duration> {
+    match cooldown_map.entry(key) {
+        dashmap::Entry::Occupied(occupied_entry) => {
+            let left = cooldown.saturating_sub(occupied_entry.get().elapsed());
+            if left.is_zero() {
+                tracing::debug!("out of cooldown");
+                occupied_entry.remove();
+
+                Ok(())
+            } else {
+                let time = SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0));
+
+                tracing::debug!("on cooldown");
+
+                Err(time + left)
+            }
+        }
+        dashmap::Entry::Vacant(vacant_entry) => {
+            tracing::debug!("new cooldown");
+            vacant_entry.insert(Instant::now());
+
+            Ok(())
+        }
+    }
 }
 
 impl Handler {
@@ -101,7 +135,9 @@ impl Handler {
                 role_names,
                 roles,
                 user_roles,
-                interaction_cooldown: <_>::default(),
+                new_role_cooldown: <_>::default(),
+                add_cooldown: <_>::default(),
+                remove_cooldown: <_>::default(),
             })
             .downgrade())
     }
@@ -158,47 +194,16 @@ impl EventHandler for Handler {
             }
         };
 
-        tracing::debug!("got guild");
-        let content: String = 'b: {
-            match guild.interaction_cooldown.entry(command.user.id) {
-                dashmap::Entry::Occupied(occupied_entry) => {
-                    let left =
-                        Duration::from_secs(3600).saturating_sub(occupied_entry.get().elapsed());
-                    if left.is_zero() {
-                        tracing::debug!("out of cooldown");
-                        occupied_entry.remove();
-                    } else {
-                        let time = SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or(std::time::Duration::from_secs(0));
-
-                        tracing::debug!("on cooldown");
-
-                        break 'b format!(
-                            "whoa cool down buddy, try again <t:{}:R>",
-                            (time + left).as_secs()
-                        );
-                    }
-                }
-                dashmap::Entry::Vacant(vacant_entry) => {
-                    tracing::debug!("new cooldown");
-                    vacant_entry.insert(Instant::now());
-                }
-            }
-
-            tracing::debug!("running cmd");
-            let content = match command.data.name.as_str() {
-                "new_role" => new_role::run(&guild, &ctx, &command).await,
-                // "delete_role" => new_role::run(&guild, &ctx, &command).await,
-                "add" => add::run(&guild, &ctx, &command).await,
-                "remove" => remove::run(&guild, &ctx, &command).await,
-                _ => "???".to_string(),
-            };
-
-            tracing::debug!("result = {content}");
-
-            break 'b content;
+        tracing::debug!("running cmd");
+        let content = match command.data.name.as_str() {
+            "new_role" => new_role::run(&guild, &ctx, &command).await,
+            // "delete_role" => new_role::run(&guild, &ctx, &command).await,
+            "add" => add::run(&guild, &ctx, &command).await,
+            "remove" => remove::run(&guild, &ctx, &command).await,
+            _ => "???".to_string(),
         };
+
+        tracing::debug!("result = {content}");
 
         let data = CreateInteractionResponseMessage::new().content(content);
         let builder = CreateInteractionResponse::Message(data);
