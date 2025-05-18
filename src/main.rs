@@ -172,6 +172,15 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!("{} is connected", ready.user.name);
 
+        for guild in ready.guilds.iter() {
+            let Ok(commands) = guild.id.get_commands(&ctx.http).await else {
+                continue;
+            };
+            for command in commands {
+                _ = guild.id.delete_command(&ctx.http, command.id).await;
+            }
+        }
+
         if let Err(err) = Command::create_global_command(&ctx.http, add::register()).await {
             tracing::error!("failed to create a command: {err}");
         }
