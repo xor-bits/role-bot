@@ -60,7 +60,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         }
     };
 
-    vacant_entry.insert(Instant::now());
+    let entry = vacant_entry.insert_entry(Instant::now());
 
     if let Err(err) = ctx
         .http
@@ -72,6 +72,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         )
         .await
     {
+        entry.remove();
         tracing::error!("failed to add role: {err}");
         return "internal error".to_string();
     }
