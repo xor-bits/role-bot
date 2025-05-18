@@ -164,7 +164,7 @@ impl EventHandler for Handler {
             tracing::error!("failed to respond to a command: {err}");
         };
 
-        time::sleep(Duration::from_secs(15)).await;
+        time::sleep(Duration::from_secs(300)).await;
 
         if let Err(err) = command.delete_response(&ctx.http).await {
             tracing::error!("failed to delete the response: {err}");
