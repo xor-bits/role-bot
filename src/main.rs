@@ -6,7 +6,8 @@ use serenity::{
     Client,
     all::{
         Command, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
-        EventHandler, GatewayIntents, GuildId, Interaction, Permissions, Ready, RoleId, UserId,
+        EventHandler, GatewayIntents, GuildId, Interaction, Member, Permissions, Ready, RoleId,
+        UserId,
     },
     async_trait,
     futures::StreamExt,
@@ -104,6 +105,32 @@ impl Handler {
 
 #[async_trait]
 impl EventHandler for Handler {
+    async fn guild_member_addition(&self, ctx: Context, new_member: Member) {
+        let guild = match self.get_guild(&ctx, new_member.guild_id).await {
+            Ok(guild) => guild,
+            Err(err) => {
+                tracing::debug!("failed to initialize guild: {err}");
+                return;
+            }
+        };
+
+        let Some(old) = guild.user_roles.get(&new_member.user.id) else {
+            return;
+        };
+
+        for role in old.value().iter() {
+            _ = ctx
+                .http
+                .add_member_role(
+                    new_member.guild_id,
+                    new_member.user.id,
+                    *role.key(),
+                    Some("prevented rejoin role removal"),
+                )
+                .await;
+        }
+    }
+
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         let Interaction::Command(command) = interaction else {
             return;
