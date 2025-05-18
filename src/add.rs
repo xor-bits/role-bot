@@ -1,11 +1,9 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serenity::all::{
     CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
     ResolvedOption, ResolvedValue,
 };
-
-use tokio::time::Instant;
 
 use crate::{Guild, cooldown};
 
@@ -70,7 +68,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         }
     };
 
-    let entry = vacant_entry.insert_entry(Instant::now());
+    let entry = vacant_entry.insert_entry(SystemTime::now());
 
     if let Err(err) = ctx
         .http

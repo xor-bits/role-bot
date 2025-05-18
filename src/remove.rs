@@ -1,11 +1,9 @@
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serenity::all::{
     CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
     ResolvedOption, ResolvedValue,
 };
-
-use tokio::time::Duration;
 
 use crate::{Guild, cooldown};
 
@@ -63,7 +61,12 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
 
     match user_roles.entry(role.id) {
         dashmap::Entry::Occupied(occupied_entry) => {
-            let left = Duration::from_secs(172_800).saturating_sub(occupied_entry.get().elapsed());
+            let left = Duration::from_secs(172_800).saturating_sub(
+                occupied_entry
+                    .get()
+                    .elapsed()
+                    .unwrap_or(Duration::from_secs(172_800)),
+            );
             if left.is_zero() {
                 tracing::debug!("out of cooldown");
                 occupied_entry.remove();

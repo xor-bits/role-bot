@@ -1,7 +1,15 @@
-use std::{env, hash::Hash, time::SystemTime};
+use std::{
+    env,
+    fs::{self, File},
+    hash::Hash,
+    io::{BufReader, BufWriter, Write},
+    sync::{Arc, atomic::AtomicBool},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use color_eyre::eyre::Result;
 use dashmap::{DashMap, DashSet, mapref::one::Ref};
+use serde::{Deserialize, Serialize};
 use serenity::{
     Client,
     all::{
@@ -12,7 +20,7 @@ use serenity::{
     async_trait,
     futures::StreamExt,
 };
-use tokio::time::{self, Duration, Instant};
+use tokio::{signal, time};
 
 //
 
@@ -22,10 +30,13 @@ mod remove;
 
 //
 
+#[derive(Serialize, Deserialize)]
 struct Handler {
+    // modified: AtomicBool,
     guilds: DashMap<GuildId, Guild>,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Guild {
     id: GuildId,
 
@@ -36,22 +47,27 @@ struct Guild {
     roles: DashSet<RoleId>,
 
     /// used for checking if the user has some role
-    user_roles: DashMap<UserId, DashMap<RoleId, Instant>>,
+    user_roles: DashMap<UserId, DashMap<RoleId, SystemTime>>,
 
     /// cooldown on sending commands
-    new_role_cooldown: DashMap<UserId, Instant>,
-    add_cooldown: DashMap<(UserId, UserId), Instant>,
-    remove_cooldown: DashMap<(UserId, UserId), Instant>,
+    new_role_cooldown: DashMap<UserId, SystemTime>,
+    add_cooldown: DashMap<(UserId, UserId), SystemTime>,
+    remove_cooldown: DashMap<(UserId, UserId), SystemTime>,
 }
 
 pub fn cooldown<K: Hash + Eq>(
-    cooldown_map: &DashMap<K, Instant>,
+    cooldown_map: &DashMap<K, SystemTime>,
     key: K,
     cooldown: Duration,
 ) -> Result<(), Duration> {
     match cooldown_map.entry(key) {
         dashmap::Entry::Occupied(occupied_entry) => {
-            let left = cooldown.saturating_sub(occupied_entry.get().elapsed());
+            let left = cooldown.saturating_sub(
+                occupied_entry
+                    .get()
+                    .elapsed()
+                    .unwrap_or(Duration::from_secs(100_000_000)),
+            );
             if left.is_zero() {
                 tracing::debug!("out of cooldown");
                 occupied_entry.remove();
@@ -59,8 +75,8 @@ pub fn cooldown<K: Hash + Eq>(
                 Ok(())
             } else {
                 let time = SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or(std::time::Duration::from_secs(0));
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0));
 
                 tracing::debug!("on cooldown");
 
@@ -69,7 +85,7 @@ pub fn cooldown<K: Hash + Eq>(
         }
         dashmap::Entry::Vacant(vacant_entry) => {
             tracing::debug!("new cooldown");
-            vacant_entry.insert(Instant::now());
+            vacant_entry.insert(SystemTime::now());
 
             Ok(())
         }
@@ -77,6 +93,39 @@ pub fn cooldown<K: Hash + Eq>(
 }
 
 impl Handler {
+    fn save(&self) -> Result<()> {
+        tracing::debug!("saving");
+
+        let mut file = File::create_new("database.new")?;
+        let buf_writer = BufWriter::new(&mut file);
+
+        ron::Options::default().to_io_writer_pretty(
+            buf_writer,
+            self,
+            ron::ser::PrettyConfig::default(),
+        )?;
+
+        file.flush()?;
+        fs::rename("database.new", "database")?;
+
+        Ok(())
+    }
+
+    fn load() -> Result<Arc<Self>> {
+        tracing::debug!("loading");
+
+        let Ok(file) = File::open("database") else {
+            return Ok(Arc::new(Handler {
+                guilds: <_>::default(),
+            }));
+        };
+        let buf_reader = BufReader::new(file);
+
+        let result = ron::Options::default().from_reader(buf_reader)?;
+
+        Ok(Arc::new(result))
+    }
+
     async fn get_guild(&self, ctx: &Context, id: GuildId) -> Result<Ref<GuildId, Guild>> {
         let vacant_entry = match self.guilds.entry(id) {
             dashmap::Entry::Vacant(vacant_entry) => vacant_entry,
@@ -109,7 +158,7 @@ impl Handler {
             .map(|(role_id, role)| (role.name.into_boxed_str(), role_id))
             .unzip();
 
-        let user_roles: DashMap<UserId, DashMap<RoleId, Instant>> = <_>::default();
+        let user_roles: DashMap<UserId, DashMap<RoleId, SystemTime>> = <_>::default();
 
         let mut members = id.members_iter(&ctx.http).boxed();
         while let Some(next) = members.next().await {
@@ -121,10 +170,10 @@ impl Handler {
                 }
             };
 
-            let roles: DashMap<RoleId, Instant> = member
+            let roles: DashMap<RoleId, SystemTime> = member
                 .roles
                 .into_iter()
-                .map(|role_id| (role_id, Instant::now() - Duration::from_secs(172_800)))
+                .map(|role_id| (role_id, SystemTime::now() - Duration::from_secs(172_800)))
                 .collect();
             user_roles.insert(member.user.id, roles);
         }
@@ -200,6 +249,7 @@ impl EventHandler for Handler {
             // "delete_role" => new_role::run(&guild, &ctx, &command).await,
             "add" => add::run(&guild, &ctx, &command).await,
             "remove" => remove::run(&guild, &ctx, &command).await,
+            // "update" => update::run(&guild, &ctx, &command).await,
             _ => "???".to_string(),
         };
 
@@ -222,13 +272,9 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!("{} is connected", ready.user.name);
 
-        for guild in ready.guilds.iter() {
-            let Ok(commands) = guild.id.get_commands(&ctx.http).await else {
-                continue;
-            };
-            for command in commands {
-                _ = guild.id.delete_command(&ctx.http, command.id).await;
-            }
+        for guild in ctx.cache.guilds() {
+            tracing::info!("guild={}", guild);
+            _ = self.get_guild(&ctx, guild).await;
         }
 
         if let Err(err) = Command::create_global_command(&ctx.http, add::register()).await {
@@ -240,6 +286,8 @@ impl EventHandler for Handler {
         if let Err(err) = Command::create_global_command(&ctx.http, remove::register()).await {
             tracing::error!("failed to create a command: {err}");
         }
+
+        tracing::info!("ready");
     }
 }
 
@@ -256,11 +304,41 @@ async fn main() -> Result<()> {
 
     let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_MEMBERS;
 
+    let database = Handler::load()?;
+
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler {
-            guilds: <_>::default(),
-        })
+        .event_handler_arc(database.clone())
         .await?;
+
+    let database2 = database.clone();
+
+    tokio::spawn(async move {
+        signal::ctrl_c().await.unwrap();
+        loop {
+            match database.save() {
+                Ok(_) => break,
+                Err(err) => {
+                    tracing::error!("failed to save database: {err}");
+                }
+            }
+        }
+        std::process::exit(0);
+    });
+
+    tokio::spawn(async move {
+        loop {
+            time::sleep(Duration::from_secs(10_000)).await;
+
+            let new = database2.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(err) = new.save() {
+                    tracing::error!("failed to save database: {err}");
+                }
+            })
+            .await
+            .unwrap();
+        }
+    });
 
     client.start().await?;
 

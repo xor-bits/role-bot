@@ -30,7 +30,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
     if let Err(cooldown) = cooldown(
         &guild.new_role_cooldown,
         interaction.user.id,
-        Duration::from_secs(3600),
+        Duration::from_secs(1_209_600),
     ) {
         return format!("command cooldown, try again <t:{}:R>", cooldown.as_secs());
     }
