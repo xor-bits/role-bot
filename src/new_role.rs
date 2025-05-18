@@ -26,13 +26,20 @@ pub fn register() -> CreateCommand {
         )
 }
 
-pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction) -> String {
+pub async fn run(
+    guild: &Guild,
+    ctx: &Context,
+    interaction: &CommandInteraction,
+) -> Result<String, String> {
     if let Err(cooldown) = cooldown(
         &guild.new_role_cooldown,
         interaction.user.id,
         Duration::from_secs(1_209_600),
     ) {
-        return format!("command cooldown, try again <t:{}:R>", cooldown.as_secs());
+        return Err(format!(
+            "command cooldown, try again <t:{}:R>",
+            cooldown.as_secs()
+        ));
     }
 
     let options = interaction.data.options();
@@ -43,7 +50,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         ..
     }) = options.first()
     else {
-        return "missing role name".to_string();
+        return Err("missing role name".to_string());
     };
 
     let colour: u32 = if let Some(ResolvedOption {
@@ -57,7 +64,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         {
             colour
         } else {
-            return "invalid colour, expected format: `#FFFFFF`".to_string();
+            return Err("invalid colour, expected format: `#FFFFFF`".to_string());
         }
     } else {
         rand::random()
@@ -66,7 +73,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
     let colour = colour & 0xFFFFFF;
 
     if !guild.role_names.insert((*name).into()) {
-        return "duplicate name".to_string();
+        return Err("duplicate name".to_string());
     }
 
     let new_role = match guild
@@ -85,19 +92,23 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         Ok(new_role) => new_role,
         Err(serenity::Error::Http(err)) => {
             tracing::error!("http error: {err}");
-            return "invalid role name".to_string();
+            return Err("invalid role name".to_string());
         }
         Err(err) => {
             tracing::error!("error: {err}");
-            return "internal error, try again".to_string();
+            return Err("internal error, try again".to_string());
         }
     };
 
     guild.roles.insert(new_role.id);
 
-    if rand::random_bool(0.1) {
-        "ok ... weirdo".to_string()
-    } else {
-        "ok".to_string()
-    }
+    Ok(format!(
+        "ok{}, created role <@&{}>",
+        if rand::random_bool(0.1) {
+            " ... weirdo"
+        } else {
+            ""
+        },
+        new_role.id,
+    ))
 }

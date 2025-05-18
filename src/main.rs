@@ -250,8 +250,11 @@ impl EventHandler for Handler {
             "add" => add::run(&guild, &ctx, &command).await,
             "remove" => remove::run(&guild, &ctx, &command).await,
             // "update" => update::run(&guild, &ctx, &command).await,
-            _ => "???".to_string(),
+            _ => Err("???".to_string()),
         };
+
+        let is_err = content.is_err();
+        let content = content.unwrap_or_else(|s| s);
 
         tracing::debug!("result = {content}");
 
@@ -261,8 +264,12 @@ impl EventHandler for Handler {
             tracing::error!("failed to respond to a command: {err}");
         };
 
+        if !is_err {
+            return;
+        }
+
         drop(guild);
-        time::sleep(Duration::from_secs(300)).await;
+        time::sleep(Duration::from_secs(120)).await;
 
         if let Err(err) = command.delete_response(&ctx.http).await {
             tracing::error!("failed to delete the response: {err}");

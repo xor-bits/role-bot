@@ -21,7 +21,11 @@ pub fn register() -> CreateCommand {
         )
 }
 
-pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction) -> String {
+pub async fn run(
+    guild: &Guild,
+    ctx: &Context,
+    interaction: &CommandInteraction,
+) -> Result<String, String> {
     let options = interaction.data.options();
 
     let Some(ResolvedOption {
@@ -30,7 +34,7 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         ..
     }) = options.first()
     else {
-        return "missing user".to_string();
+        return Err("missing user".to_string());
     };
 
     if let Err(cooldown) = cooldown(
@@ -38,7 +42,10 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         (interaction.user.id, user.id),
         Duration::from_secs(3600),
     ) {
-        return format!("command cooldown, try again <t:{}:R>", cooldown.as_secs());
+        return Err(format!(
+            "command cooldown, try again <t:{}:R>",
+            cooldown.as_secs()
+        ));
     }
 
     let Some(ResolvedOption {
@@ -47,15 +54,15 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         ..
     }) = options.get(1)
     else {
-        return "missing role".to_string();
+        return Err("missing role".to_string());
     };
 
     if !guild.roles.contains(&role.id) {
-        return "nice try".to_string();
+        return Err("nice try".to_string());
     }
 
     let Some(user) = guild.user_roles.get(&user.id) else {
-        return "invalid user".to_string();
+        return Err("invalid user".to_string());
     };
     let user_roles = user.value();
 
@@ -77,14 +84,14 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
 
                 tracing::debug!("on cooldown");
 
-                return format!(
+                return Err(format!(
                     "cooldown on a recently added role, try again <t:{}:R>",
                     (time + left).as_secs()
-                );
+                ));
             }
         }
         dashmap::Entry::Vacant(_) => {
-            return "wdym, the user doesn't even have this role".to_string();
+            return Err("wdym, the user doesn't even have this role".to_string());
         }
     };
 
@@ -99,12 +106,17 @@ pub async fn run(guild: &Guild, ctx: &Context, interaction: &CommandInteraction)
         .await
     {
         tracing::error!("failed to add role: {err}");
-        return "internal error".to_string();
+        return Err("internal error".to_string());
     }
 
-    if rand::random_bool(0.1) {
-        "ok ... weirdo".to_string()
-    } else {
-        "ok".to_string()
-    }
+    Ok(format!(
+        "ok{}, removed role <@&{}> from <@{}>",
+        if rand::random_bool(0.1) {
+            " ... weirdo"
+        } else {
+            ""
+        },
+        role.id,
+        *user.key()
+    ))
 }
