@@ -1,11 +1,11 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serenity::all::{
     CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption, EditRole,
     Permissions, ResolvedOption, ResolvedValue,
 };
 
-use crate::{Guild, cooldown};
+use crate::{DAY_SECONDS, Guild, cooldown};
 
 //
 
@@ -100,7 +100,10 @@ pub async fn run(
         }
     };
 
-    guild.roles.insert(new_role.id);
+    guild.roles.insert(
+        new_role.id,
+        SystemTime::now() + Duration::from_secs(2 * DAY_SECONDS),
+    );
 
     Ok(format!(
         "ok{}, created role <@&{}>",

@@ -7,6 +7,7 @@ rustc-ice-*
 .gdb_history
 docker-compose.yml
 database
+data
 
 
 # Added by cargo

@@ -57,7 +57,7 @@ pub async fn run(
         return Err("missing role".to_string());
     };
 
-    if !guild.roles.contains(&role.id) {
+    if !guild.roles.contains_key(&role.id) {
         return Err("nice try".to_string());
     }
 

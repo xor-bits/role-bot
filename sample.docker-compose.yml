@@ -1,5 +1,16 @@
 services:
+  db:
+    image: postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=DB PASSWORD HERE
+    volumes:
+      - ./data/:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
   bot:
+    build: ./
+    restart: unless-stopped
     environment:
       - TOKEN=TOKEN HERE
-    build: ./
+      - PG_ADDR=postgres://postgres:DB PASSWORD HERE@db/bot
