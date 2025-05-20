@@ -28,6 +28,7 @@ mod list;
 mod orphaned;
 
 mod add;
+mod query;
 mod remove;
 
 //
@@ -37,6 +38,12 @@ pub const DAY_SECONDS: u64 = HOUR_SECONDS * 24;
 pub const WEEK_SECONDS: u64 = DAY_SECONDS * 7;
 
 //
+
+pub enum QueryRoleResult {
+    Owned(UserId),
+    Orphan,
+    NotFound,
+}
 
 pub struct Handler {
     me: Weak<Handler>,
@@ -226,6 +233,27 @@ WHERE role_id = $1
 
         tracing::debug!("take_role rows affected: {}", rows.rows_affected());
         Ok(rows.rows_affected() == 1)
+    }
+
+    pub async fn query_role(&self, guild_id: GuildId, role_id: RoleId) -> Result<QueryRoleResult> {
+        let result: Option<(Option<i64>,)> = sqlx::query_as(
+            "
+SELECT role_id
+FROM roles
+WHERE guild_id = $1
+  AND role_id = $2
+    ",
+        )
+        .bind(guild_id.get() as i64)
+        .bind(role_id.get() as i64)
+        .fetch_optional(&self.db)
+        .await?;
+
+        match result {
+            Some((Some(user_id),)) => Ok(QueryRoleResult::Owned(UserId::new(user_id as u64))),
+            Some((None,)) => Ok(QueryRoleResult::Orphan),
+            None => Ok(QueryRoleResult::NotFound),
+        }
     }
 
     /// returns true on success
@@ -474,6 +502,7 @@ impl EventHandler for Handler {
             "list" => list::run(self, &ctx, &command, guild_id).await,
             "orphaned" => orphaned::run(self, &ctx, &command, guild_id).await,
             "add" => add::run(self, &ctx, &command, guild_id).await,
+            "query" => query::run(self, &ctx, &command, guild_id).await,
             "remove" => remove::run(self, &ctx, &command, guild_id).await,
 
             _ => Err("???".to_string()),
@@ -529,6 +558,37 @@ impl EventHandler for Handler {
             }
         }
 
+        if let Ok(commands) = ctx
+            .http
+            .get_global_commands()
+            .await
+            .inspect_err(|err| tracing::error!("failed to get global commands: {err}"))
+        {
+            for command in commands {
+                if [
+                    "take_ownership",
+                    "create",
+                    "delete",
+                    "list",
+                    "orphaned",
+                    "add",
+                    "query",
+                    "remove",
+                ]
+                .contains(&command.name.as_str())
+                {
+                    continue;
+                }
+
+                tracing::debug!("deleting old command: {}", command.name);
+                _ = ctx
+                    .http
+                    .delete_global_command(command.id)
+                    .await
+                    .inspect_err(|err| tracing::error!("failed to delete global command: {err}"));
+            }
+        }
+
         tracing::debug!("registering commands");
         for (name, cmd) in [
             ("take_ownership", take_ownership::register()),
@@ -537,6 +597,7 @@ impl EventHandler for Handler {
             ("list", list::register()),
             ("orphaned", orphaned::register()),
             ("add", add::register()),
+            ("query", query::register()),
             ("remove", remove::register()),
             // ("add", add::register()),
             // ("new_role", new_role::register()),
