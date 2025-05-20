@@ -152,6 +152,23 @@ RETURNING *
         Ok(rows.rows_affected() != 0)
     }
 
+    pub async fn list_count(&self, guild_id: GuildId, user_id: UserId) -> Result<usize> {
+        let (rows,) = sqlx::query_as::<_, (i64,)>(
+            "
+SELECT COUNT(*)
+FROM roles
+WHERE guild_id = $1
+  AND owner_user_id = $2
+        ",
+        )
+        .bind(guild_id.get() as i64)
+        .bind(user_id.get() as i64)
+        .fetch_one(&self.db)
+        .await?;
+
+        Ok(rows as usize)
+    }
+
     pub async fn list(&self, guild_id: GuildId, user_id: UserId) -> Result<Vec<(String,)>> {
         let rows = sqlx::query_as(
             "
@@ -167,6 +184,22 @@ WHERE guild_id = $1
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn orphaned_count(&self, guild_id: GuildId) -> Result<usize> {
+        let (rows,) = sqlx::query_as::<_, (i64,)>(
+            "
+SELECT COUNT(*)
+FROM roles
+WHERE guild_id = $1
+  AND owner_user_id IS NULL
+        ",
+        )
+        .bind(guild_id.get() as i64)
+        .fetch_one(&self.db)
+        .await?;
+
+        Ok(rows as usize)
     }
 
     pub async fn orphaned(&self, guild_id: GuildId) -> Result<Vec<(String,)>> {
