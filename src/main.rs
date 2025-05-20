@@ -238,7 +238,7 @@ WHERE role_id = $1
     pub async fn query_role(&self, guild_id: GuildId, role_id: RoleId) -> Result<QueryRoleResult> {
         let result: Option<(Option<i64>,)> = sqlx::query_as(
             "
-SELECT role_id
+SELECT owner_user_id
 FROM roles
 WHERE guild_id = $1
   AND role_id = $2
