@@ -10,8 +10,8 @@ use serenity::{
     Client,
     all::{
         ChannelId, Command, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
-        CreateMessage, EventHandler, GatewayIntents, GuildId, Interaction, Member, Permissions,
-        Ready, RoleId, UserId,
+        EventHandler, GatewayIntents, GuildId, Interaction, Member, Permissions, Ready, RoleId,
+        UserId,
     },
     async_trait,
 };
@@ -20,13 +20,15 @@ use tokio::{signal, time};
 
 //
 
-// mod add;
-mod balance;
-// mod new_role;
-// mod remove;
-// mod transfer;
-mod extend;
-mod main_channel;
+mod take_ownership;
+
+mod create;
+mod delete;
+mod list;
+mod orphaned;
+
+mod add;
+mod remove;
 
 //
 
@@ -42,7 +44,8 @@ pub struct Handler {
 }
 
 impl Handler {
-    pub async fn add_guild(&self, guild_id: GuildId) -> Result<()> {
+    /// returns true on success
+    pub async fn create_guild(&self, guild_id: GuildId) -> Result<bool> {
         let rows = sqlx::query(
             "
 INSERT INTO guilds (guild_id)
@@ -55,32 +58,132 @@ ON CONFLICT DO NOTHING
         .await?;
 
         tracing::debug!("add_guild rows affected: {}", rows.rows_affected());
-        Ok(())
+        Ok(rows.rows_affected() == 1)
     }
 
-    pub async fn add_role(&self, guild_id: GuildId, role_id: RoleId, name: &str) -> Result<()> {
+    /// returns true on success
+    pub async fn create_role_force(
+        &self,
+        guild_id: GuildId,
+        role_id: RoleId,
+        name: &str,
+        owner_user_id: Option<UserId>,
+    ) -> Result<bool> {
         let rows = sqlx::query(
             "
-INSERT INTO roles (role_id, guild_id, name, deadline)
-VALUES ($1, $2, $3, NOW() + '1 day')
+INSERT INTO roles (role_id, guild_id, name, owner_user_id)
+VALUES ($1, $2, $3, $4)
 ON CONFLICT DO NOTHING
         ",
         )
         .bind(role_id.get() as i64)
         .bind(guild_id.get() as i64)
         .bind(name)
+        .bind(owner_user_id.map(|id| id.get() as i64))
         .execute(&self.db)
         .await?;
 
         tracing::debug!("add_role rows affected: {}", rows.rows_affected());
-        Ok(())
+        Ok(rows.rows_affected() == 1)
     }
 
-    pub async fn add_user(&self, guild_id: GuildId, user_id: UserId) -> Result<()> {
+    /// returns true on success
+    pub async fn create_role(
+        &self,
+        guild_id: GuildId,
+        role_id: RoleId,
+        name: &str,
+        owner_user_id: UserId,
+    ) -> Result<bool> {
         let rows = sqlx::query(
             "
-INSERT INTO users (user_id, guild_id, balance)
-VALUES ($1, $2, 10000000)
+INSERT INTO roles (role_id, guild_id, name, owner_user_id)
+SELECT $1, $2, $3, $4
+WHERE (
+    SELECT COUNT(*)
+    FROM roles
+    WHERE owner_user_id = $4
+      AND guild_id = $2
+) < 20
+ON CONFLICT DO NOTHING
+        ",
+        )
+        .bind(role_id.get() as i64)
+        .bind(guild_id.get() as i64)
+        .bind(name)
+        .bind(owner_user_id.get() as i64)
+        .execute(&self.db)
+        .await?;
+
+        tracing::debug!("add_role rows affected: {}", rows.rows_affected());
+        Ok(rows.rows_affected() == 1)
+    }
+
+    /// returns true on success
+    pub async fn delete_role(
+        &self,
+        guild_id: GuildId,
+        role_id: RoleId,
+        user_id: UserId,
+    ) -> Result<bool> {
+        let rows = sqlx::query(
+            "
+DELETE FROM roles
+WHERE guild_id = $1
+  AND role_id = $2
+  AND user_id = $3
+RETURNING *
+        ",
+        )
+        .bind(guild_id.get() as i64)
+        .bind(role_id.get() as i64)
+        .bind(user_id.get() as i64)
+        .execute(&self.db)
+        .await?;
+
+        tracing::debug!("delete_role rows affected: {}", rows.rows_affected());
+        Ok(rows.rows_affected() != 0)
+    }
+
+    pub async fn list(&self, guild_id: GuildId, user_id: UserId) -> Result<Vec<(String,)>> {
+        let rows = sqlx::query_as(
+            "
+SELECT name
+FROM roles
+WHERE guild_id = $1
+  AND owner_user_id = $2
+        ",
+        )
+        .bind(guild_id.get() as i64)
+        .bind(user_id.get() as i64)
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn orphaned(&self, guild_id: GuildId) -> Result<Vec<(String,)>> {
+        let rows = sqlx::query_as(
+            "
+SELECT name
+FROM roles
+WHERE guild_id = $1
+  AND owner_user_id IS NULL
+        ",
+        )
+        .bind(guild_id.get() as i64)
+        .fetch_all(&self.db)
+        .await?;
+
+        Ok(rows)
+    }
+
+    /// returns true on success
+    pub async fn create_user(&self, guild_id: GuildId, user_id: UserId) -> Result<bool> {
+        let rows = sqlx::query(
+            "
+INSERT INTO users (user_id, guild_id)
+VALUES ($1, $2)
 ON CONFLICT DO NOTHING
         ",
         )
@@ -90,19 +193,52 @@ ON CONFLICT DO NOTHING
         .await?;
 
         tracing::debug!("add_user rows affected: {}", rows.rows_affected());
-        Ok(())
+        Ok(rows.rows_affected() == 1)
     }
 
-    pub async fn apply_role(
+    /// returns true on success
+    pub async fn take_ownership(
         &self,
         guild_id: GuildId,
         role_id: RoleId,
         user_id: UserId,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let rows = sqlx::query(
             "
-INSERT INTO user_roles (user_id, role_id, guild_id, delete_cooldown)
-VALUES ($1, $2, $3, NOW() + '6 hours')
+UPDATE roles
+SET owner_user_id = $3
+WHERE role_id = $1
+  AND guild_id = $2
+  AND owner_user_id IS NULL
+  AND (
+    SELECT COUNT(*)
+    FROM roles
+    WHERE owner_user_id = $3
+      AND guild_id = $2
+) < 20
+        ",
+        )
+        .bind(role_id.get() as i64)
+        .bind(guild_id.get() as i64)
+        .bind(user_id.get() as i64)
+        .execute(&self.db)
+        .await?;
+
+        tracing::debug!("take_role rows affected: {}", rows.rows_affected());
+        Ok(rows.rows_affected() == 1)
+    }
+
+    /// returns true on success
+    pub async fn add_role(
+        &self,
+        guild_id: GuildId,
+        role_id: RoleId,
+        user_id: UserId,
+    ) -> Result<bool> {
+        let rows = sqlx::query(
+            "
+INSERT INTO user_roles (user_id, role_id, guild_id)
+VALUES ($1, $2, $3)
 ON CONFLICT DO NOTHING
         ",
         )
@@ -113,102 +249,64 @@ ON CONFLICT DO NOTHING
         .await?;
 
         tracing::debug!("apply_role rows affected: {}", rows.rows_affected());
-        Ok(())
+        Ok(rows.rows_affected() == 1)
     }
 
-    pub async fn get_balance(&self, guild_id: GuildId, user_id: UserId) -> Result<usize> {
-        let balance: Option<(i32,)> = sqlx::query_as(
-            "
-SELECT balance
-FROM users
-WHERE guild_id = $1
-  AND user_id = $2
-            ",
-        )
-        .bind(guild_id.get() as i64)
-        .bind(user_id.get() as i64)
-        .fetch_optional(&self.db)
-        .await?;
-
-        Ok(balance.map_or(10_000_000, |(i,)| i as usize))
-    }
-
-    pub async fn withdraw(
-        &self,
-        guild_id: GuildId,
-        user_id: UserId,
-        amount: usize,
-    ) -> Result<Option<usize>> {
-        let balance: Option<(i32,)> = sqlx::query_as(
-            "
-UPDATE users
-SET balance = balance - $3
-WHERE user_id = $1
-  AND guild_id = $2
-  AND balance >= $3
-RETURNING balance
-            ",
-        )
-        .bind(user_id.get() as i64)
-        .bind(guild_id.get() as i64)
-        .bind(amount.min(10_000_000) as i64)
-        .fetch_optional(&self.db)
-        .await?;
-
-        Ok(balance.map(|(i,)| i as usize))
-    }
-
-    // pub async fn deposit(
-    //     &self,
-    //     guild_id: GuildId,
-    //     user_id: UserId,
-    //     amount: usize,
-    // ) -> Result<usize> {
-    //     sql;
-    // }
-
-    pub async fn add_money(&self, amount: usize) -> Result<()> {
-        let rows = sqlx::query(
-            "
-UPDATE users
-SET balance = LEAST(balance + $1, 10000000)
-WHERE balance < 10000000
-            ",
-        )
-        .bind(amount.min(10_000_000) as i64)
-        .execute(&self.db)
-        .await?;
-
-        tracing::debug!("add_money rows affected: {}", rows.rows_affected());
-        Ok(())
-    }
-
-    pub async fn extend_role(
+    /// returns true on success
+    pub async fn remove_role(
         &self,
         guild_id: GuildId,
         role_id: RoleId,
-        amount: usize,
-    ) -> Result<Option<usize>> {
-        let updated_deadline: Option<(i64,)> = sqlx::query_as(
-            "
-UPDATE roles
-SET deadline = deadline + INTERVAL '1 second' * $3
+        user_id: UserId,
+        caller_user_id: UserId,
+    ) -> Result<bool> {
+        // cant remove roles from self, except if it is owned
+        // => can remove if it is owned, or not self
+        let rows = if user_id == caller_user_id {
+            sqlx::query(
+                "
+DELETE FROM user_roles
 WHERE guild_id = $1
   AND role_id = $2
-RETURNING CAST(EXTRACT(epoch FROM deadline) AS bigint)
+  AND user_id = $3
+  AND $4 = (
+      SELECT owner_user_id
+      FROM roles
+      WHERE guild_id = $1
+        AND role_id = $2
+  )
+RETURNING *
             ",
-        )
-        .bind(guild_id.get() as i64)
-        .bind(role_id.get() as i64)
-        .bind(amount.min(100_000_000) as i64)
-        .fetch_optional(&self.db)
-        .await?;
+            )
+            .bind(guild_id.get() as i64)
+            .bind(role_id.get() as i64)
+            .bind(user_id.get() as i64)
+            .bind(caller_user_id.get() as i64)
+            .execute(&self.db)
+            .await?
+        } else {
+            sqlx::query(
+                "
+DELETE FROM user_roles
+WHERE guild_id = $1
+  AND role_id = $2
+  AND user_id = $3
+RETURNING *
+                ",
+            )
+            .bind(guild_id.get() as i64)
+            .bind(role_id.get() as i64)
+            .bind(user_id.get() as i64)
+            .execute(&self.db)
+            .await?
+        };
 
-        Ok(updated_deadline.map(|(deadline,)| deadline as usize))
+        tracing::debug!("remove_role rows affected: {}", rows.rows_affected());
+        Ok(rows.rows_affected() != 0)
     }
 
     pub async fn update_database(&self, ctx: &Context, guild_id: GuildId) -> Result<()> {
-        self.add_guild(guild_id).await?;
+        self.create_guild(guild_id).await?;
 
         let roles = guild_id.roles(&ctx.http).await?;
 
@@ -221,7 +319,8 @@ RETURNING CAST(EXTRACT(epoch FROM deadline) AS bigint)
 
             add_role_jobs.push(async move {
                 //
-                self.add_role(guild_id, *role_id, &role.name).await
+                self.create_role_force(guild_id, *role_id, &role.name, None)
+                    .await
             });
         }
         while let Some(next) = add_role_jobs.next().await {
@@ -246,7 +345,7 @@ RETURNING CAST(EXTRACT(epoch FROM deadline) AS bigint)
 
             add_user_jobs.push(async move {
                 //
-                self.add_user(guild_id, member.user.id).await
+                self.create_user(guild_id, member.user.id).await
             });
 
             for role_id in member.roles {
@@ -259,7 +358,7 @@ RETURNING CAST(EXTRACT(epoch FROM deadline) AS bigint)
 
                 add_user_roles_jobs.push(async move {
                     //
-                    self.apply_role(guild_id, role_id, member.user.id).await
+                    self.add_role(guild_id, role_id, member.user.id).await
                 });
             }
         }
@@ -313,105 +412,8 @@ WHERE guild_id = $1
         }
     }
 
-    pub async fn warnings_one_day(&self, ctx: &Context, guild_id: GuildId) -> Result<()> {
-        let Some(channel_id) = self.get_main_channel(guild_id).await? else {
-            tracing::debug!("not sending a warning, main channel not set");
-            return Ok(());
-        };
-
-        let warnings: Vec<(i64, String, i64)> = sqlx::query_as(
-            "
-UPDATE roles
-SET warning_day_sent = true
-WHERE warning_day_sent = false
-  AND guild_id = $1
-  AND deadline <= NOW() + '1 day'
-  AND deadline > NOW()
-RETURNING role_id, name, CAST(EXTRACT(epoch FROM deadline) AS bigint)
-            ",
-        )
-        .bind(guild_id.get() as i64)
-        .fetch_all(&self.db)
-        .await?;
-
-        self.print_warnings(
-            ctx,
-            channel_id,
-            "# Warning, the following roles will be deleted in a day",
-            warnings.into_iter(),
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    pub async fn warnings_one_hour(&self, ctx: &Context, guild_id: GuildId) -> Result<()> {
-        let Some(channel_id) = self.get_main_channel(guild_id).await? else {
-            tracing::debug!("not sending a warning, main channel not set");
-            return Ok(());
-        };
-
-        let warnings: Vec<(i64, String, i64)> = sqlx::query_as(
-            "
-UPDATE roles
-SET warning_hour_sent = true
-WHERE warning_hour_sent = false
-  AND deadline <= NOW() + '1 hour'
-  AND deadline > NOW()
-RETURNING role_id, name, CAST(EXTRACT(epoch FROM deadline) AS bigint)
-            ",
-        )
-        .fetch_all(&self.db)
-        .await?;
-
-        self.print_warnings(
-            ctx,
-            channel_id,
-            "# Warning, the following roles will be deleted in an hour",
-            warnings.into_iter(),
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    async fn print_warnings(
-        &self,
-        ctx: &Context,
-        channel_id: ChannelId,
-        msg: &str,
-        warnings: impl ExactSizeIterator<Item = (i64, String, i64)>,
-    ) -> Result<()> {
-        if warnings.len() == 0 {
-            return Ok(());
-        }
-
-        let mut buffer = String::new();
-
-        use std::fmt::Write;
-
-        _ = writeln!(&mut buffer, "{msg}");
-
-        for (_, role_name, deadline) in warnings {
-            let len = buffer.len();
-            _ = writeln!(&mut buffer, " - {role_name}: <t:{}:R>", deadline);
-            // _ = writeln!(&mut buffer, " - <@&{}>: <t:{}:R>", role_id as u64, deadline);
-            if buffer.len() > 2000 {
-                channel_id
-                    .send_message(&ctx.http, CreateMessage::new().content(&buffer[0..len]))
-                    .await?;
-                buffer.clear();
-                _ = writeln!(&mut buffer, " - {role_name}: <t:{}:R>", deadline);
-                // _ = writeln!(&mut buffer, " - <@&{}>: <t:{}:R>", role_id as u64, deadline);
-            }
-        }
-
-        channel_id
-            .send_message(&ctx.http, CreateMessage::new().content(buffer))
-            .await?;
-
-        Ok(())
-    }
+    // pub async fn orphaned_roles(&self, ctx: Context, guild_id: GuildId) {
+    // }
 }
 
 #[async_trait]
@@ -466,15 +468,14 @@ impl EventHandler for Handler {
 
         tracing::debug!("running cmd");
         let content = match command.data.name.as_str() {
-            // "new_role" => new_role::run(&guild, &ctx, &command).await,
-            // "delete_role" => new_role::run(&guild, &ctx, &command).await,
-            // "add" => add::run(&guild, &ctx, &command).await,
-            // "remove" => remove::run(&guild, &ctx, &command).await,
-            // "update" => update::run(&guild, &ctx, &command).await,
-            "balance" => balance::run(self, &ctx, &command).await,
-            // "transfer" => transfer::run(&guild, &ctx, &command).await,
-            "main_channel" => main_channel::run(self, &ctx, &command).await,
-            "extend" => extend::run(self, &ctx, &command).await,
+            "take_ownership" => take_ownership::run(self, &ctx, &command, guild_id).await,
+            "create" => create::run(self, &ctx, &command, guild_id).await,
+            "delete" => delete::run(self, &ctx, &command, guild_id).await,
+            "list" => list::run(self, &ctx, &command, guild_id).await,
+            "orphaned" => orphaned::run(self, &ctx, &command, guild_id).await,
+            "add" => add::run(self, &ctx, &command, guild_id).await,
+            "remove" => remove::run(self, &ctx, &command, guild_id).await,
+
             _ => Err("???".to_string()),
         };
 
@@ -528,45 +529,22 @@ impl EventHandler for Handler {
             }
         }
 
-        for guild_id in ctx.cache.guilds() {
-            let ctx = ctx.clone();
-            let handler = handler.clone();
-
-            tokio::spawn(async move {
-                loop {
-                    if let Err(err) = handler.warnings_one_day(&ctx, guild_id).await {
-                        _ = err;
-                        // tracing::error!("failed to send warnings: {err}");
-                    };
-                    if let Err(err) = handler.warnings_one_hour(&ctx, guild_id).await {
-                        _ = err;
-                        // tracing::error!("failed to send warnings: {err}");
-                    };
-                    time::sleep(Duration::from_secs(60)).await;
-                }
-            });
-        }
-
-        let handler = handler.clone();
-        tokio::spawn(async move {
-            // add enough so that each user can keep 12 roles up
-            if let Err(err) = handler.add_money(3600 * 12).await {
-                tracing::error!("failed to add money: {err}");
-            }
-
-            // hourly
-            time::sleep(Duration::from_secs(3600)).await;
-        });
-
         tracing::debug!("registering commands");
         for (name, cmd) in [
+            ("take_ownership", take_ownership::register()),
+            ("create", create::register()),
+            ("delete", delete::register()),
+            ("list", list::register()),
+            ("orphaned", orphaned::register()),
+            ("add", add::register()),
+            ("remove", remove::register()),
             // ("add", add::register()),
             // ("new_role", new_role::register()),
             // ("remove", remove::register()),
-            ("balance", balance::register()),
+            // ("balance", balance::register()),
             // ("transfer", transfer::register()),
-            ("main_channel", main_channel::register()),
-            ("extend", extend::register()),
+            // ("main_channel", main_channel::register()),
+            // ("extend", extend::register()),
         ] {
             tracing::debug!("registering command {name}");
             if let Err(err) = Command::create_global_command(&ctx.http, cmd).await {

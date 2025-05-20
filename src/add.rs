@@ -1,11 +1,9 @@
-use std::time::{Duration, SystemTime};
-
 use serenity::all::{
-    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption, GuildId,
     ResolvedOption, ResolvedValue,
 };
 
-use crate::{Guild, cooldown};
+use crate::Handler;
 
 //
 
@@ -16,90 +14,55 @@ pub fn register() -> CreateCommand {
             CreateCommandOption::new(CommandOptionType::User, "user", "target user").required(true),
         )
         .add_option(
-            CreateCommandOption::new(CommandOptionType::Role, "role", "role to be applied")
+            CreateCommandOption::new(CommandOptionType::Role, "role", "role to be added")
                 .required(true),
         )
 }
 
 pub async fn run(
-    guild: &Guild,
+    handler: &Handler,
     ctx: &Context,
     interaction: &CommandInteraction,
+    guild_id: GuildId,
 ) -> Result<String, String> {
     let options = interaction.data.options();
 
     let Some(ResolvedOption {
-        name: "user",
-        value: ResolvedValue::User(user, ..),
+        value: ResolvedValue::User(user, _),
         ..
     }) = options.first()
     else {
-        return Err("missing user".to_string());
+        return Err("missing target user".to_string());
     };
 
-    if let Err(cooldown) = cooldown(
-        &guild.add_cooldown,
-        (interaction.user.id, user.id),
-        Duration::from_secs(3600),
-    ) {
-        return Err(format!(
-            "command cooldown, try again <t:{}:R>",
-            cooldown.as_secs()
-        ));
-    }
-
     let Some(ResolvedOption {
-        name: "role",
-        value: ResolvedValue::Role(role, ..),
+        value: ResolvedValue::Role(role),
         ..
     }) = options.get(1)
     else {
         return Err("missing role".to_string());
     };
 
-    if !guild.roles.contains_key(&role.id) {
-        return Err("nice try".to_string());
+    let Ok(success) = handler
+        .add_role(guild_id, role.id, user.id)
+        .await
+        .inspect_err(|err| tracing::error!("failed to add role: {err}"))
+    else {
+        return Err("internal error".to_string());
+    };
+
+    if !success {
+        return Err("role already added".to_string());
     }
-
-    let Some(user) = guild.user_roles.get(&user.id) else {
-        return Err("invalid user".to_string());
-    };
-    let user_roles = user.value();
-
-    // let is_self = interaction.user.id == *user.key();
-
-    let vacant_entry = match user_roles.entry(role.id) {
-        dashmap::Entry::Vacant(vacant_entry) => vacant_entry,
-        dashmap::Entry::Occupied(..) => {
-            return Err("role already applied".to_string());
-        }
-    };
-
-    let entry = vacant_entry.insert_entry(SystemTime::now());
 
     if let Err(err) = ctx
         .http
-        .add_member_role(
-            guild.id,
-            *user.key(),
-            role.id,
-            Some("added custom role to a user using the add command"),
-        )
+        .add_member_role(guild_id, user.id, role.id, Some("added role via command"))
         .await
     {
-        entry.remove();
         tracing::error!("failed to add role: {err}");
         return Err("internal error".to_string());
     }
 
-    Ok(format!(
-        "ok{}, added role <@&{}> to <@{}>",
-        if rand::random_bool(0.1) {
-            " ... weirdo"
-        } else {
-            ""
-        },
-        role.id,
-        *user.key()
-    ))
+    Ok(format!("role <@&{}> added to <@{}>", role.id, user.id))
 }

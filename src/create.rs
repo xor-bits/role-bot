@@ -1,16 +1,14 @@
-use std::time::{Duration, SystemTime};
-
 use serenity::all::{
     CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption, EditRole,
-    Permissions, ResolvedOption, ResolvedValue,
+    GuildId, Permissions, ResolvedOption, ResolvedValue,
 };
 
-use crate::{DAY_SECONDS, Guild, cooldown};
+use crate::Handler;
 
 //
 
 pub fn register() -> CreateCommand {
-    CreateCommand::new("new_role")
+    CreateCommand::new("create")
         .description("Create a new role")
         .add_option(
             CreateCommandOption::new(CommandOptionType::String, "name", "role name").required(true),
@@ -27,25 +25,14 @@ pub fn register() -> CreateCommand {
 }
 
 pub async fn run(
-    guild: &Guild,
+    handler: &Handler,
     ctx: &Context,
     interaction: &CommandInteraction,
+    guild_id: GuildId,
 ) -> Result<String, String> {
-    if let Err(cooldown) = cooldown(
-        &guild.new_role_cooldown,
-        interaction.user.id,
-        Duration::from_secs(1_209_600),
-    ) {
-        return Err(format!(
-            "command cooldown, try again <t:{}:R>",
-            cooldown.as_secs()
-        ));
-    }
-
     let options = interaction.data.options();
 
     let Some(ResolvedOption {
-        name: "name",
         value: ResolvedValue::String(name),
         ..
     }) = options.first()
@@ -54,7 +41,6 @@ pub async fn run(
     };
 
     let colour: u32 = if let Some(ResolvedOption {
-        name: "colour",
         value: ResolvedValue::String(colour_str),
         ..
     }) = options.get(1)
@@ -69,15 +55,9 @@ pub async fn run(
     } else {
         rand::random()
     };
-
     let colour = colour & 0xFFFFFF;
 
-    if !guild.role_names.insert((*name).into()) {
-        return Err("duplicate name".to_string());
-    }
-
-    let new_role = match guild
-        .id
+    let new_role = match guild_id
         .create_role(
             &ctx.http,
             EditRole::new()
@@ -96,22 +76,23 @@ pub async fn run(
         }
         Err(err) => {
             tracing::error!("error: {err}");
-            return Err("internal error, try again".to_string());
+            return Err("internal error".to_string());
         }
     };
 
-    guild.roles.insert(
-        new_role.id,
-        SystemTime::now() + Duration::from_secs(2 * DAY_SECONDS),
-    );
+    let Ok(success) = handler
+        .create_role(guild_id, new_role.id, name, interaction.user.id)
+        .await
+        .inspect_err(|err| tracing::error!("failed to create role: {err}"))
+    else {
+        _ = guild_id.delete_role(&ctx.http, new_role.id).await;
+        return Err("internal error".to_string());
+    };
 
-    Ok(format!(
-        "ok{}, created role <@&{}>",
-        if rand::random_bool(0.1) {
-            " ... weirdo"
-        } else {
-            ""
-        },
-        new_role.id,
-    ))
+    if !success {
+        _ = guild_id.delete_role(&ctx.http, new_role.id).await;
+        return Err("too many owned roles".to_string());
+    }
+
+    Ok(format!("new role {name} created"))
 }

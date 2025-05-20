@@ -1,17 +1,15 @@
-use std::time::{Duration, SystemTime};
-
 use serenity::all::{
-    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption, GuildId,
     ResolvedOption, ResolvedValue,
 };
 
-use crate::{Guild, cooldown};
+use crate::Handler;
 
 //
 
 pub fn register() -> CreateCommand {
     CreateCommand::new("remove")
-        .description("Remove a role from a user, 2 day cooldown after adding")
+        .description("Remove a role from a user")
         .add_option(
             CreateCommandOption::new(CommandOptionType::User, "user", "target user").required(true),
         )
@@ -22,101 +20,49 @@ pub fn register() -> CreateCommand {
 }
 
 pub async fn run(
-    guild: &Guild,
+    handler: &Handler,
     ctx: &Context,
     interaction: &CommandInteraction,
+    guild_id: GuildId,
 ) -> Result<String, String> {
     let options = interaction.data.options();
 
     let Some(ResolvedOption {
-        name: "user",
-        value: ResolvedValue::User(user, ..),
+        value: ResolvedValue::User(user, _k),
         ..
     }) = options.first()
     else {
-        return Err("missing user".to_string());
+        return Err("missing target user".to_string());
     };
 
-    if let Err(cooldown) = cooldown(
-        &guild.remove_cooldown,
-        (interaction.user.id, user.id),
-        Duration::from_secs(3600),
-    ) {
-        return Err(format!(
-            "command cooldown, try again <t:{}:R>",
-            cooldown.as_secs()
-        ));
-    }
-
     let Some(ResolvedOption {
-        name: "role",
-        value: ResolvedValue::Role(role, ..),
+        value: ResolvedValue::Role(role),
         ..
     }) = options.get(1)
     else {
         return Err("missing role".to_string());
     };
 
-    if !guild.roles.contains_key(&role.id) {
-        return Err("nice try".to_string());
+    let Ok(success) = handler
+        .remove_role(guild_id, role.id, user.id, interaction.user.id)
+        .await
+        .inspect_err(|err| tracing::error!("failed to remove role: {err}"))
+    else {
+        return Err("internal error".to_string());
+    };
+
+    if !success {
+        return Err("selected user doesn't have the role or\nyou tried to remove someone's role from yourself".to_string());
     }
-
-    let Some(user) = guild.user_roles.get(&user.id) else {
-        return Err("invalid user".to_string());
-    };
-    let user_roles = user.value();
-
-    match user_roles.entry(role.id) {
-        dashmap::Entry::Occupied(occupied_entry) => {
-            let left = Duration::from_secs(172_800).saturating_sub(
-                occupied_entry
-                    .get()
-                    .elapsed()
-                    .unwrap_or(Duration::from_secs(172_800)),
-            );
-            if left.is_zero() {
-                tracing::debug!("out of cooldown");
-                occupied_entry.remove();
-            } else {
-                let time = SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or(std::time::Duration::from_secs(0));
-
-                tracing::debug!("on cooldown");
-
-                return Err(format!(
-                    "cooldown on a recently added role, try again <t:{}:R>",
-                    (time + left).as_secs()
-                ));
-            }
-        }
-        dashmap::Entry::Vacant(_) => {
-            return Err("wdym, the user doesn't even have this role".to_string());
-        }
-    };
 
     if let Err(err) = ctx
         .http
-        .remove_member_role(
-            guild.id,
-            *user.key(),
-            role.id,
-            Some("added custom role to a user using the add command"),
-        )
+        .remove_member_role(guild_id, user.id, role.id, Some("removed role via command"))
         .await
     {
-        tracing::error!("failed to add role: {err}");
+        tracing::error!("failed to delete role: {err}");
         return Err("internal error".to_string());
     }
 
-    Ok(format!(
-        "ok{}, removed role <@&{}> from <@{}>",
-        if rand::random_bool(0.1) {
-            " ... weirdo"
-        } else {
-            ""
-        },
-        role.id,
-        *user.key()
-    ))
+    Ok(format!("role <@&{}> removed from <@{}>", role.id, user.id))
 }
