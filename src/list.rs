@@ -37,7 +37,7 @@ pub async fn run(
     let user_id: UserId;
     let just_count: bool;
 
-    match &options[..] {
+    match options {
         [
             Some(ResolvedValue::User(user, _)),
             Some(ResolvedValue::Boolean(count)),
@@ -47,17 +47,17 @@ pub async fn run(
             Some(ResolvedValue::User(user, _)),
         ] => {
             user_id = user.id;
-            just_count = *count;
+            just_count = count;
         }
-        [Some(ResolvedValue::Boolean(count))] => {
+        [Some(ResolvedValue::Boolean(count)), None] => {
             user_id = interaction.user.id;
-            just_count = *count;
+            just_count = count;
         }
-        [Some(ResolvedValue::User(user, _))] => {
+        [Some(ResolvedValue::User(user, _)), None] => {
             user_id = user.id;
             just_count = false;
         }
-        [] => {
+        [None, None] => {
             user_id = interaction.user.id;
             just_count = false;
         }
