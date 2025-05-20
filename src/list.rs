@@ -75,7 +75,7 @@ pub async fn run(
             return Err("internal error".to_string());
         };
 
-        Ok(format!("<@{}> owns {list} roles", interaction.user.id))
+        Ok(format!("<@{user_id}> owns {list} roles"))
     } else {
         let Ok(list) = handler
             .list(guild_id, user_id)
@@ -86,7 +86,7 @@ pub async fn run(
         };
 
         if list.is_empty() {
-            return Ok(format!("<@{}> owns 0 roles", interaction.user.id));
+            return Ok(format!("<@{user_id}> owns 0 roles"));
         }
 
         let mut buf = String::new();
