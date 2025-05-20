@@ -138,7 +138,7 @@ ON CONFLICT DO NOTHING
 DELETE FROM roles
 WHERE guild_id = $1
   AND role_id = $2
-  AND user_id = $3
+  AND owner_user_id = $3
 RETURNING *
         ",
         )
