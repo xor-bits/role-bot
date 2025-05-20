@@ -42,10 +42,5 @@ pub async fn run(
         }
     }
 
-    _ = interaction
-        .channel_id
-        .send_message(&ctx.http, CreateMessage::new().content(buf))
-        .await;
-
-    Ok("there".to_string())
+    Ok(buf)
 }
