@@ -1,5 +1,6 @@
 use std::{
     env,
+    fmt::Display,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -10,13 +11,13 @@ use serenity::{
     Client,
     all::{
         ChannelId, Command, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
-        EventHandler, GatewayIntents, GuildId, Interaction, Member, Permissions, Ready, RoleId,
-        UserId,
+        CreateMessage, EventHandler, GatewayIntents, GuildId, Interaction, Member, Message,
+        MessageId, MessageUpdateEvent, Permissions, Ready, RoleId, Settings, UserId,
     },
     async_trait,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tokio::{signal, time};
+use tokio::{signal, sync::Mutex, time};
 
 //
 
@@ -48,6 +49,8 @@ pub enum QueryRoleResult {
 pub struct Handler {
     me: Weak<Handler>,
     db: PgPool,
+
+    last_u: Mutex<Option<UserId>>,
 }
 
 impl Handler {
@@ -512,6 +515,85 @@ impl EventHandler for Handler {
         }
     }
 
+    async fn message(&self, ctx: Context, new_message: Message) {
+        let mut last_u = self.last_u.lock().await;
+        if new_message.content.as_str() != "u" || new_message.author.bot {
+            *last_u = None;
+            return;
+        }
+
+        if *last_u != Some(new_message.author.id) && last_u.is_some() {
+            if let Err(err) = new_message
+                .channel_id
+                .send_message(&ctx.http, CreateMessage::new().content("u"))
+                .await
+            {
+                tracing::error!("failed to reply: {err}");
+            }
+            *last_u = None;
+        } else {
+            *last_u = Some(new_message.author.id);
+        }
+    }
+
+    async fn message_update(
+        &self,
+        ctx: Context,
+        old_if_available: Option<Message>,
+        _new: Option<Message>,
+        _event: MessageUpdateEvent,
+    ) {
+        let Some(old_if_available) = old_if_available else {
+            return;
+        };
+
+        if let Err(err) = old_if_available
+            .reply(
+                &ctx.http,
+                format!("anti-censoring: {}", old_if_available.content.as_str()),
+            )
+            .await
+        {
+            tracing::error!("failed to reply: {err}");
+        }
+    }
+
+    async fn message_delete(
+        &self,
+        ctx: Context,
+        channel_id: ChannelId,
+        deleted_message_id: MessageId,
+        _guild_id: Option<GuildId>,
+    ) {
+        fn get_msg(
+            ctx: &Context,
+            channel_id: ChannelId,
+            deleted_message_id: MessageId,
+        ) -> Option<Message> {
+            ctx.cache
+                .message(channel_id, deleted_message_id)
+                .map(|msg| msg.clone())
+        }
+
+        tracing::debug!("message deleted");
+        let Some(old_if_available) = get_msg(&ctx, channel_id, deleted_message_id) else {
+            return;
+        };
+
+        if let Err(err) = channel_id
+            .send_message(
+                &ctx.http,
+                CreateMessage::new().content(format!(
+                    "<@{}> tried to delete this message: {}",
+                    old_if_available.author.id, old_if_available.content,
+                )),
+            )
+            .await
+        {
+            tracing::error!("failed to reply: {err}");
+        }
+    }
+
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         let Interaction::Command(command) = interaction else {
             return;
@@ -662,17 +744,29 @@ async fn main() -> Result<()> {
     let token = env::var("TOKEN")?;
     let pg_addr = env::var("PG_ADDR")?;
 
-    let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_MEMBERS;
+    let intents = GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MEMBERS
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::DIRECT_MESSAGES;
 
     let db = PgPoolOptions::new()
         .max_connections(5)
         .connect(&pg_addr)
         .await?;
 
-    let handler = Arc::new_cyclic(|me| Handler { me: me.clone(), db });
+    let handler = Arc::new_cyclic(|me| Handler {
+        me: me.clone(),
+        db,
+        last_u: Mutex::new(None),
+    });
+
+    let mut settings = Settings::default();
+    settings.max_messages = 256;
 
     let mut client = Client::builder(&token, intents)
         .event_handler_arc(handler)
+        .cache_settings(settings)
         .await?;
 
     tokio::select! {
