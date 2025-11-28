@@ -540,12 +540,20 @@ impl EventHandler for Handler {
         &self,
         ctx: Context,
         old_if_available: Option<Message>,
-        _new: Option<Message>,
+        new: Option<Message>,
         _event: MessageUpdateEvent,
     ) {
         let Some(old_if_available) = old_if_available else {
             return;
         };
+
+        if let Some(new_if_available) = new {
+            // cant compare if the new is not available
+
+            if new_if_available.content.as_str() == old_if_available.content.as_str() {
+                return;
+            }
+        }
 
         if let Err(err) = old_if_available
             .reply(
